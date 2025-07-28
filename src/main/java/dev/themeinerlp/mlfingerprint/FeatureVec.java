@@ -1,5 +1,10 @@
 package dev.themeinerlp.mlfingerprint;
 
+/**
+ * Represents a feature vector for machine learning purposes.
+ * This class encapsulates various features extracted from packets, such as client ID, protocol version,
+ * packet ID, length, direction, inter-arrival time (iat), entropy, and timestamp.
+ */
 final class FeatureVec {
     String clientId;
     int clientProtocolVersion;
@@ -10,10 +15,23 @@ final class FeatureVec {
     double entropy;
     long timestamp;
 
+    private FeatureVec() {
+        // Private constructor to enforce the use of the builder
+    }
+
+    /**
+     * Creates a new FeatureVec builder instance.
+     *
+     * @return a new Builder instance for constructing FeatureVec objects
+     */
     static Builder builder() {
         return new Builder();
     }
 
+
+    /**
+     * Builder class for constructing FeatureVec instances.
+     */
     static class Builder {
         private final FeatureVec vec;
         Builder() {
