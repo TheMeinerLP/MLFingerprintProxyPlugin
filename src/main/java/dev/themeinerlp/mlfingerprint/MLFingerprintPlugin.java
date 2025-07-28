@@ -9,9 +9,12 @@ import com.github.retrooper.packetevents.event.ProtocolPacketEvent;
 import com.github.retrooper.packetevents.netty.buffer.ByteBufHelper;
 import com.google.gson.Gson;
 import com.google.inject.Inject;
+import com.rabbitmq.client.AMQP;
 import com.rabbitmq.client.Channel;
 import com.rabbitmq.client.Connection;
 import com.rabbitmq.client.ConnectionFactory;
+import com.rabbitmq.client.DefaultConsumer;
+import com.rabbitmq.client.Envelope;
 import com.velocitypowered.api.event.Subscribe;
 import com.velocitypowered.api.event.proxy.ProxyInitializeEvent;
 import com.velocitypowered.api.event.proxy.ProxyShutdownEvent;
@@ -21,11 +24,14 @@ import com.velocitypowered.api.plugin.annotation.DataDirectory;
 import com.velocitypowered.api.proxy.ProxyServer;
 import dev.themeinerlp.mlfingerprint.config.MLConfiguration;
 import dev.themeinerlp.mlfingerprint.config.RabbitMQ;
+import dev.themeinerlp.mlfingerprint.config.RabbitMQResult;
+import net.kyori.adventure.text.Component;
 import org.slf4j.Logger;
 import org.spongepowered.configurate.CommentedConfigurationNode;
 import org.spongepowered.configurate.ConfigurateException;
 import org.spongepowered.configurate.hocon.HoconConfigurationLoader;
 
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -49,6 +55,7 @@ public class MLFingerprintPlugin implements PacketListener {
     private Channel rabbitChannel;
     private final Path dataDirectory;
     private String exchange;
+    private String routingKey;
 
 
     @Inject
@@ -82,6 +89,7 @@ public class MLFingerprintPlugin implements PacketListener {
             }
             MLConfiguration mlConfiguration = load.get(MLConfiguration.class);
             RabbitMQ rabbitMQConfig = mlConfiguration.getRabbitMQ();
+            RabbitMQResult rabbitMQResultConfig = mlConfiguration.getRabbitMQResult();
             ConnectionFactory factory = new ConnectionFactory();
             factory.setPort(rabbitMQConfig.getPort());
             factory.setVirtualHost(rabbitMQConfig.getVhost());
@@ -92,8 +100,51 @@ public class MLFingerprintPlugin implements PacketListener {
             rabbitChannel = rabbitConn.createChannel();
             logger.info("Connected to RabbitMQ at {}:{}", rabbitMQConfig.getHost(), rabbitMQConfig.getPort());
             rabbitChannel.exchangeDeclare(rabbitMQConfig.getExchange(), rabbitMQConfig.getType(), true);
+
+            // Declare queue for packet data
+            rabbitChannel.queueDeclare(rabbitMQConfig.getQueue(), true, false, false, null);
+            rabbitChannel.queueBind(rabbitMQConfig.getQueue(), rabbitMQConfig.getExchange(), rabbitMQConfig.getRoutingKey());
+            logger.info("Queue '{}' declared and bound to exchange '{}'", rabbitMQConfig.getQueue(), rabbitMQConfig.getExchange());
+            
+            // Declare queue for client percentage messages
+            rabbitChannel.queueDeclare(rabbitMQResultConfig.getQueue(), true, false, false, null);
+            rabbitChannel.queueBind(rabbitMQResultConfig.getQueue(), rabbitMQConfig.getExchange(), rabbitMQResultConfig.getRoutingKey());
+            rabbitChannel.basicConsume(rabbitMQResultConfig.getQueue(), true, "proxy", new DefaultConsumer(rabbitChannel) {
+                @Override
+                public void handleDelivery(final String consumerTag, final Envelope envelope, final AMQP.BasicProperties properties, final byte[] body) throws IOException {
+                    if (Math.random() < 0.5) {
+                        return; // 50% der Nachrichten werden übersprungen
+                    }
+                    String message = new String(body, StandardCharsets.UTF_8);
+                    logger.debug("Received message from RabbitMQ: {}", message);
+                    // Parse the message to extract client ID and type
+                    try {
+                        ClientPercentageMessage clientPercentageMessage = gson.fromJson(message, ClientPercentageMessage.class);
+                        if (clientPercentageMessage == null) {
+                            logger.error("Failed to parse message: {}", message);
+                            return;
+                        }
+                        UUID clientId = UUID.fromString(clientPercentageMessage.getClientId());
+                        String clientType = clientPercentageMessage.getClient();
+                        double percentage = Math.floor(clientPercentageMessage.getPercentage() * 100) / 100.0;
+                        if (clientType == null || percentage < 0) {
+                            logger.error("Invalid client percentage message: {}", message);
+                            return;
+                        }
+                        server.getPlayer(clientId).ifPresent(player -> {
+                            player.sendActionBar(Component.text("Your client type is " + clientType + " with " + percentage + "% accuracy", net.kyori.adventure.text.format.NamedTextColor.GREEN));
+                        });
+
+                    } catch (Exception ex) {
+                        logger.error("Failed to parse RabbitMQ message", ex);
+                    }
+                }
+            });
+            logger.info("Queue '{}' declared and bound to exchange '{}'", rabbitMQResultConfig.getQueue(), rabbitMQConfig.getExchange());
+            
             logger.info("Exchange '{}' declared with type '{}'", rabbitMQConfig.getExchange(), rabbitMQConfig.getType());
             this.exchange = rabbitMQConfig.getExchange();
+            this.routingKey = rabbitMQConfig.getRoutingKey();
         } catch (ConfigurateException ex) {
             logger.error("Failed to load configuration file", ex);
             return;
@@ -168,6 +219,7 @@ public class MLFingerprintPlugin implements PacketListener {
         sendToRabbit(vec);
     }
 
+
     private void sendToRabbit(FeatureVec vec) {
         try {
             if (rabbitChannel == null || !rabbitChannel.isOpen()) {
@@ -179,7 +231,7 @@ public class MLFingerprintPlugin implements PacketListener {
                 return;
             }
             String payload = gson.toJson(vec);
-            rabbitChannel.basicPublish(this.exchange, "", null, payload.getBytes(StandardCharsets.UTF_8));
+            rabbitChannel.basicPublish(this.exchange, this.routingKey, null, payload.getBytes(StandardCharsets.UTF_8));
         } catch (Exception ex) {
             logger.error("Failed to send packet data to RabbitMQ", ex);
         }

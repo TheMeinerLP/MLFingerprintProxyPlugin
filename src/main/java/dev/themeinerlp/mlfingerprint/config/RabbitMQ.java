@@ -10,8 +10,9 @@ public class RabbitMQ {
     private String username = "guest";
     private String password = "guest";
     private String exchange = "mlfingerprint";
-    private String queue = "mlfingerprint_queue";
-    private String type = "fanout";
+    private String queue = "packets_queue";
+    private String routingKey = "packets";
+    private String type = "direct";
     private String vhost = "/";
 
     public String getHost() {
@@ -44,5 +45,9 @@ public class RabbitMQ {
 
     public String getVhost() {
         return vhost;
+    }
+
+    public String getRoutingKey() {
+        return routingKey;
     }
 }
