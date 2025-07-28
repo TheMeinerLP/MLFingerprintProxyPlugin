@@ -26,15 +26,16 @@ import org.spongepowered.configurate.CommentedConfigurationNode;
 import org.spongepowered.configurate.ConfigurateException;
 import org.spongepowered.configurate.hocon.HoconConfigurationLoader;
 
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
-@Plugin(id = "MLFingerprint", name = "ML Fingerprint", version = "999.0.0",
+@Plugin(id = "ml_fingerprint", name = "ML Fingerprint", version = "999.0.0",
         url = "https://themeinerlp.dev", description = "A simple packet capture plugin", authors = {"TheMeinerLP"},
 dependencies = {
-        @Dependency(id = "PacketEvents")
+        @Dependency(id = "packetevents")
 })
 public class MLFingerprintPlugin implements PacketListener {
 
@@ -76,6 +77,9 @@ public class MLFingerprintPlugin implements PacketListener {
                 .build();
         try {
             CommentedConfigurationNode load = loader.load();
+            if (Files.notExists(file)) {
+                loader.save(load);
+            }
             MLConfiguration mlConfiguration = load.get(MLConfiguration.class);
             RabbitMQ rabbitMQConfig = mlConfiguration.getRabbitMQ();
             ConnectionFactory factory = new ConnectionFactory();
@@ -125,17 +129,42 @@ public class MLFingerprintPlugin implements PacketListener {
     }
 
     private void handlePacket(UUID clientId, ProtocolPacketEvent packet, Direction dir) {
-        long now = System.nanoTime();
+        if (clientId == null) {
+            return;
+        }
+        if (packet.getPacketId() < 0) {
+            logger.warn("Received packet with invalid ID: {}", packet.getPacketId());
+            return;
+        }
+        if (state == null) {
+            logger.warn("State map is null, cannot process packet for client {}", clientId);
+            return;
+        }
         ClientState st = state.computeIfAbsent(clientId, id -> new ClientState());
+        long now = System.nanoTime();
         long iat = (st.lastTimestamp > 0) ? now - st.lastTimestamp : 0;
         st.lastTimestamp = now;
 
+        if (iat < 0) {
+            logger.warn("Negative inter-arrival time detected for client {}: {}", clientId, iat);
+            iat = 0; // Reset to zero to avoid negative values
+        }
+        int protocolVersion = packet.getUser().getClientVersion().getProtocolVersion();
         int packetId = packet.getPacketId();
         int length = ByteBufHelper.readableBytes(packet.getByteBuf());
         byte[] raw = ByteBufHelper.array(packet.getByteBuf());
         double entropy = FeatureUtils.calcEntropy(raw);
 
-        FeatureVec vec = new FeatureVec(clientId.toString(), packetId, length, dir, iat, entropy, now);
+        FeatureVec vec = FeatureVec.builder()
+                .clientId(clientId.toString())
+                .clientProtocolVersion(protocolVersion)
+                .packetId(packetId)
+                .length(length)
+                .direction(dir)
+                .iat(iat)
+                .entropy(entropy)
+                .timestamp(System.currentTimeMillis())
+                .build();
         sendToRabbit(vec);
     }
 
@@ -150,7 +179,7 @@ public class MLFingerprintPlugin implements PacketListener {
                 return;
             }
             String payload = gson.toJson(vec);
-            rabbitChannel.basicPublish(this.exchange, "", null, payload.getBytes("UTF-8"));
+            rabbitChannel.basicPublish(this.exchange, "", null, payload.getBytes(StandardCharsets.UTF_8));
         } catch (Exception ex) {
             logger.error("Failed to send packet data to RabbitMQ", ex);
         }
