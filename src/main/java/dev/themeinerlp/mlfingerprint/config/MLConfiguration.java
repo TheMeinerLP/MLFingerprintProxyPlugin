@@ -14,6 +14,9 @@ public class MLConfiguration {
     
     @Comment("Interval in seconds for displaying client information (default: 1)")
     private int displayIntervalSeconds = 1;
+    
+    @Comment("Accuracy threshold in percentage (0-100). If a client's evaluation accuracy meets or exceeds this threshold, no further evaluations will occur (default: 95)")
+    private double accuracyThreshold = 80.0;
 
     public RabbitMQ getRabbitMQ() {
         return rabbitMQ;
@@ -29,5 +32,9 @@ public class MLConfiguration {
     
     public int getDisplayIntervalSeconds() {
         return displayIntervalSeconds;
+    }
+    
+    public double getAccuracyThreshold() {
+        return accuracyThreshold;
     }
 }

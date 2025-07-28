@@ -74,6 +74,7 @@ public class MLFingerprintPlugin implements PacketListener {
     // Configuration options
     private int evaluationIntervalMinutes;
     private int displayIntervalSeconds;
+    private double accuracyThreshold;
     private final DateTimeFormatter timeFormatter = DateTimeFormatter.ofPattern("HH:mm:ss");
     
     // Scheduler for periodic tasks
@@ -117,8 +118,9 @@ public class MLFingerprintPlugin implements PacketListener {
             // Load configuration options
             this.evaluationIntervalMinutes = mlConfiguration.getEvaluationIntervalMinutes();
             this.displayIntervalSeconds = mlConfiguration.getDisplayIntervalSeconds();
-            logger.info("Evaluation interval: {} minutes, Display interval: {} seconds", 
-                    this.evaluationIntervalMinutes, this.displayIntervalSeconds);
+            this.accuracyThreshold = mlConfiguration.getAccuracyThreshold();
+            logger.info("Evaluation interval: {} minutes, Display interval: {} seconds, Accuracy threshold: {}%", 
+                    this.evaluationIntervalMinutes, this.displayIntervalSeconds, this.accuracyThreshold);
             ConnectionFactory factory = new ConnectionFactory();
             factory.setPort(rabbitMQConfig.getPort());
             factory.setVirtualHost(rabbitMQConfig.getVhost());
@@ -161,6 +163,14 @@ public class MLFingerprintPlugin implements PacketListener {
                         // Get or create client state
                         ClientState clientState = state.computeIfAbsent(clientId, id -> new ClientState());
                         
+                        // Check if the accuracy threshold has already been met
+                        if (clientState.thresholdMet) {
+                            // Skip evaluation if threshold has been met
+                            logger.debug("Skipping evaluation for client {} (accuracy threshold of {}% has been met with {}%)",
+                                    clientId, accuracyThreshold, clientState.lastPercentage);
+                            return;
+                        }
+                        
                         // Check if enough time has passed since the last evaluation
                         long currentTime = System.currentTimeMillis();
                         long evaluationIntervalMillis = TimeUnit.MINUTES.toMillis(evaluationIntervalMinutes);
@@ -171,6 +181,13 @@ public class MLFingerprintPlugin implements PacketListener {
                             clientState.lastEvaluationTime = currentTime;
                             clientState.lastClientType = clientType;
                             clientState.lastPercentage = percentage;
+                            
+                            // Check if the accuracy threshold has been met
+                            if (percentage >= accuracyThreshold) {
+                                clientState.thresholdMet = true;
+                                logger.info("Accuracy threshold of {}% met for client {} with {}%. No further evaluations will occur.",
+                                        accuracyThreshold, clientId, percentage);
+                            }
                             
                             logger.info("Re-evaluated client {} as {} with {}% accuracy", 
                                     clientId, clientType, percentage);
@@ -343,32 +360,49 @@ public class MLFingerprintPlugin implements PacketListener {
                 return;
             }
             
-            // Calculate next evaluation time
-            long nextEvaluationTime = clientState.lastEvaluationTime + evaluationIntervalMillis;
-            
-            // Format times
+            // Format last evaluation time
             String lastEvalTime = formatTime(clientState.lastEvaluationTime);
-            String nextEvalTime = formatTime(nextEvaluationTime);
             
-            // Calculate time remaining until next evaluation
-            long timeRemainingMillis = Math.max(0, nextEvaluationTime - currentTime);
-            long minutesRemaining = TimeUnit.MILLISECONDS.toMinutes(timeRemainingMillis);
-            long secondsRemaining = TimeUnit.MILLISECONDS.toSeconds(timeRemainingMillis) % 60;
+            // Set up title display
             player.sendTitlePart(TitlePart.TIMES, Title.Times.times(
                     Duration.of(500, ChronoUnit.MILLIS), // fade in
                     Duration.of(1, ChronoUnit.SECONDS), // stay
                     Duration.of(500, ChronoUnit.MILLIS) // fade out
             ));
+            
+            // Display client type and accuracy
             player.sendTitlePart(TitlePart.TITLE, MiniMessage.miniMessage().deserialize("<green>Your client type is <yellow><client> <green>with <yellow><accuracy>% <green>accuracy.",
                     Placeholder.component("client", Component.text(clientState.lastClientType)),
                     Placeholder.component("accuracy", Component.text(clientState.lastPercentage))
             ));
-            player.sendTitlePart(TitlePart.SUBTITLE, MiniMessage.miniMessage().deserialize("<green>Last evaluation: <yellow><last_eval_time>,<green> Next evaluation: <yellow><next_eval_time>(<yellow><minutes_remaining>m <seconds_remaining>s <green>remaining)",
-                    Placeholder.component("last_eval_time", Component.text(lastEvalTime)),
-                    Placeholder.component("next_eval_time", Component.text(nextEvalTime)),
-                    Placeholder.component("minutes_remaining", Component.text(minutesRemaining)),
-                    Placeholder.component("seconds_remaining", Component.text(secondsRemaining))
-            ));
+            
+            // Check if accuracy threshold has been met
+            if (clientState.thresholdMet) {
+                // Display message indicating that the threshold has been met
+                player.sendTitlePart(TitlePart.SUBTITLE, MiniMessage.miniMessage().deserialize(
+                        "<green>Last evaluation: <yellow><last_eval_time> <green>- <yellow>Accuracy threshold of <threshold>% met! <green>No further evaluations needed.",
+                        Placeholder.component("last_eval_time", Component.text(lastEvalTime)),
+                        Placeholder.component("threshold", Component.text(accuracyThreshold))
+                ));
+            } else {
+                // Calculate next evaluation time
+                long nextEvaluationTime = clientState.lastEvaluationTime + evaluationIntervalMillis;
+                String nextEvalTime = formatTime(nextEvaluationTime);
+                
+                // Calculate time remaining until next evaluation
+                long timeRemainingMillis = Math.max(0, nextEvaluationTime - currentTime);
+                long minutesRemaining = TimeUnit.MILLISECONDS.toMinutes(timeRemainingMillis);
+                long secondsRemaining = TimeUnit.MILLISECONDS.toSeconds(timeRemainingMillis) % 60;
+                
+                // Display next evaluation time and time remaining
+                player.sendTitlePart(TitlePart.SUBTITLE, MiniMessage.miniMessage().deserialize(
+                        "<green>Last evaluation: <yellow><last_eval_time>,<green> Next evaluation: <yellow><next_eval_time>(<yellow><minutes_remaining>m <seconds_remaining>s <green>remaining)",
+                        Placeholder.component("last_eval_time", Component.text(lastEvalTime)),
+                        Placeholder.component("next_eval_time", Component.text(nextEvalTime)),
+                        Placeholder.component("minutes_remaining", Component.text(minutesRemaining)),
+                        Placeholder.component("seconds_remaining", Component.text(secondsRemaining))
+                ));
+            }
         });
     }
 }

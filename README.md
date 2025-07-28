@@ -20,6 +20,7 @@ The plugin works by:
 - Machine learning-based client classification
 - RabbitMQ integration for communication with ML model
 - Regular client evaluation and information display
+- Configurable accuracy threshold to stop evaluations when sufficient confidence is reached
 
 ## Installation
 
@@ -55,6 +56,9 @@ evaluationIntervalMinutes=1
 
 # Interval in seconds for displaying client information
 displayIntervalSeconds=1
+
+# Accuracy threshold in percentage (0-100). If a client's evaluation accuracy meets or exceeds this threshold, no further evaluations will occur
+accuracyThreshold=95.0
 ```
 
 ### RabbitMQ Setup
@@ -112,6 +116,13 @@ The plugin evaluates clients at regular intervals (configurable) and displays in
 - Client type (vanilla or modified)
 - Confidence level of the classification
 - Number of packets processed
+
+When a client's evaluation accuracy meets or exceeds the configured threshold (default: 95%), the plugin will:
+1. Stop further evaluations for that client
+2. Display a message indicating that the accuracy threshold has been met
+3. Continue to show the last evaluation results with an indication that no further evaluations will occur
+
+This feature helps reduce unnecessary processing and network traffic once a client has been identified with high confidence.
 
 ## Development
 

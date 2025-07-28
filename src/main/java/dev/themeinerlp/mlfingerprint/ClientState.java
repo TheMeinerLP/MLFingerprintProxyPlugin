@@ -7,6 +7,7 @@ package dev.themeinerlp.mlfingerprint;
  * - A packet counter to track the number of packets processed
  * - The last evaluation time, which is used to determine when to re-evaluate the client
  * - The last client type and percentage from the evaluation
+ * - Whether the accuracy threshold has been met, which determines if further evaluations should occur
  */
 final class ClientState {
     long lastTimestamp = 0;
@@ -16,4 +17,5 @@ final class ClientState {
     long lastEvaluationTime = 0;
     String lastClientType = null;
     double lastPercentage = 0.0;
+    boolean thresholdMet = false;
 }
