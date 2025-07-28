@@ -26,6 +26,10 @@ import dev.themeinerlp.mlfingerprint.config.MLConfiguration;
 import dev.themeinerlp.mlfingerprint.config.RabbitMQ;
 import dev.themeinerlp.mlfingerprint.config.RabbitMQResult;
 import net.kyori.adventure.text.Component;
+import net.kyori.adventure.text.minimessage.MiniMessage;
+import net.kyori.adventure.text.minimessage.tag.resolver.Placeholder;
+import net.kyori.adventure.title.Title;
+import net.kyori.adventure.title.TitlePart;
 import org.slf4j.Logger;
 import org.spongepowered.configurate.CommentedConfigurationNode;
 import org.spongepowered.configurate.ConfigurateException;
@@ -35,8 +39,18 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Duration;
+import java.time.Instant;
+import java.time.LocalDateTime;
+import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
+import java.time.temporal.ChronoUnit;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 
 @Plugin(id = "ml_fingerprint", name = "ML Fingerprint", version = "999.0.0",
         url = "https://themeinerlp.dev", description = "A simple packet capture plugin", authors = {"TheMeinerLP"},
@@ -56,6 +70,15 @@ public class MLFingerprintPlugin implements PacketListener {
     private final Path dataDirectory;
     private String exchange;
     private String routingKey;
+    
+    // Configuration options
+    private int evaluationIntervalMinutes;
+    private int displayIntervalSeconds;
+    private final DateTimeFormatter timeFormatter = DateTimeFormatter.ofPattern("HH:mm:ss");
+    
+    // Scheduler for periodic tasks
+    private ScheduledExecutorService scheduler;
+    private ScheduledFuture<?> displayTask;
 
 
     @Inject
@@ -90,6 +113,12 @@ public class MLFingerprintPlugin implements PacketListener {
             MLConfiguration mlConfiguration = load.get(MLConfiguration.class);
             RabbitMQ rabbitMQConfig = mlConfiguration.getRabbitMQ();
             RabbitMQResult rabbitMQResultConfig = mlConfiguration.getRabbitMQResult();
+            
+            // Load configuration options
+            this.evaluationIntervalMinutes = mlConfiguration.getEvaluationIntervalMinutes();
+            this.displayIntervalSeconds = mlConfiguration.getDisplayIntervalSeconds();
+            logger.info("Evaluation interval: {} minutes, Display interval: {} seconds", 
+                    this.evaluationIntervalMinutes, this.displayIntervalSeconds);
             ConnectionFactory factory = new ConnectionFactory();
             factory.setPort(rabbitMQConfig.getPort());
             factory.setVirtualHost(rabbitMQConfig.getVhost());
@@ -112,9 +141,6 @@ public class MLFingerprintPlugin implements PacketListener {
             rabbitChannel.basicConsume(rabbitMQResultConfig.getQueue(), true, "proxy", new DefaultConsumer(rabbitChannel) {
                 @Override
                 public void handleDelivery(final String consumerTag, final Envelope envelope, final AMQP.BasicProperties properties, final byte[] body) throws IOException {
-                    if (Math.random() < 0.5) {
-                        return; // 50% der Nachrichten werden übersprungen
-                    }
                     String message = new String(body, StandardCharsets.UTF_8);
                     logger.debug("Received message from RabbitMQ: {}", message);
                     // Parse the message to extract client ID and type
@@ -131,10 +157,30 @@ public class MLFingerprintPlugin implements PacketListener {
                             logger.error("Invalid client percentage message: {}", message);
                             return;
                         }
-                        server.getPlayer(clientId).ifPresent(player -> {
-                            player.sendActionBar(Component.text("Your client type is " + clientType + " with " + percentage + "% accuracy", net.kyori.adventure.text.format.NamedTextColor.GREEN));
-                        });
-
+                        
+                        // Get or create client state
+                        ClientState clientState = state.computeIfAbsent(clientId, id -> new ClientState());
+                        
+                        // Check if enough time has passed since the last evaluation
+                        long currentTime = System.currentTimeMillis();
+                        long evaluationIntervalMillis = TimeUnit.MINUTES.toMillis(evaluationIntervalMinutes);
+                        
+                        if (clientState.lastEvaluationTime == 0 || 
+                            currentTime - clientState.lastEvaluationTime >= evaluationIntervalMillis) {
+                            // Time to re-evaluate
+                            clientState.lastEvaluationTime = currentTime;
+                            clientState.lastClientType = clientType;
+                            clientState.lastPercentage = percentage;
+                            
+                            logger.info("Re-evaluated client {} as {} with {}% accuracy", 
+                                    clientId, clientType, percentage);
+                            
+                            // The scheduler will handle displaying the information to the player
+                        } else {
+                            // Skip evaluation, log for debugging
+                            logger.debug("Skipping evaluation for client {} (last evaluation was {} ms ago, interval is {} ms)",
+                                    clientId, currentTime - clientState.lastEvaluationTime, evaluationIntervalMillis);
+                        }
                     } catch (Exception ex) {
                         logger.error("Failed to parse RabbitMQ message", ex);
                     }
@@ -152,12 +198,43 @@ public class MLFingerprintPlugin implements PacketListener {
             logger.error("Failed to connect to RabbitMQ", ex);
             return;
         }
+        
+        // Initialize scheduler for periodic tasks
+        this.scheduler = Executors.newSingleThreadScheduledExecutor();
+        this.displayTask = this.scheduler.scheduleAtFixedRate(
+                this::displayClientInformation,
+                displayIntervalSeconds, // initial delay
+                displayIntervalSeconds, // period
+                TimeUnit.SECONDS
+        );
+        logger.info("Scheduled client information display task every {} seconds", displayIntervalSeconds);
+        
         PacketEvents.getAPI().getEventManager().registerListener(this, PacketListenerPriority.HIGHEST);
     }
 
     @Subscribe
     public void onShutdown(ProxyShutdownEvent e) {
         try {
+            // Shutdown scheduler
+            if (displayTask != null) {
+                displayTask.cancel(false);
+                logger.info("Cancelled client information display task");
+            }
+            if (scheduler != null) {
+                scheduler.shutdown();
+                try {
+                    if (!scheduler.awaitTermination(5, TimeUnit.SECONDS)) {
+                        scheduler.shutdownNow();
+                    }
+                    logger.info("Scheduler shut down successfully");
+                } catch (InterruptedException ex) {
+                    scheduler.shutdownNow();
+                    Thread.currentThread().interrupt();
+                    logger.error("Scheduler shutdown interrupted", ex);
+                }
+            }
+            
+            // Close RabbitMQ connections
             if (rabbitChannel != null) rabbitChannel.close();
             if (rabbitConn != null) rabbitConn.close();
         } catch (Exception ignored) {
@@ -235,5 +312,63 @@ public class MLFingerprintPlugin implements PacketListener {
         } catch (Exception ex) {
             logger.error("Failed to send packet data to RabbitMQ", ex);
         }
+    }
+    
+    /**
+     * Formats a timestamp in milliseconds to a human-readable time string (HH:mm:ss).
+     *
+     * @param timestamp The timestamp in milliseconds
+     * @return A formatted time string
+     */
+    private String formatTime(long timestamp) {
+        LocalDateTime dateTime = LocalDateTime.ofInstant(Instant.ofEpochMilli(timestamp), ZoneId.systemDefault());
+        return dateTime.format(timeFormatter);
+    }
+    
+    /**
+     * Displays client information to all online players.
+     * This method is called periodically by the scheduler.
+     */
+    private void displayClientInformation() {
+        long currentTime = System.currentTimeMillis();
+        long evaluationIntervalMillis = TimeUnit.MINUTES.toMillis(evaluationIntervalMinutes);
+        
+        // Iterate through all online players
+        server.getAllPlayers().forEach(player -> {
+            UUID clientId = player.getUniqueId();
+            ClientState clientState = state.get(clientId);
+            
+            // Skip if no evaluation has been done yet
+            if (clientState == null || clientState.lastEvaluationTime == 0 || clientState.lastClientType == null) {
+                return;
+            }
+            
+            // Calculate next evaluation time
+            long nextEvaluationTime = clientState.lastEvaluationTime + evaluationIntervalMillis;
+            
+            // Format times
+            String lastEvalTime = formatTime(clientState.lastEvaluationTime);
+            String nextEvalTime = formatTime(nextEvaluationTime);
+            
+            // Calculate time remaining until next evaluation
+            long timeRemainingMillis = Math.max(0, nextEvaluationTime - currentTime);
+            long minutesRemaining = TimeUnit.MILLISECONDS.toMinutes(timeRemainingMillis);
+            long secondsRemaining = TimeUnit.MILLISECONDS.toSeconds(timeRemainingMillis) % 60;
+            player.sendTitlePart(TitlePart.TIMES, Title.Times.times(
+                    Duration.of(500, ChronoUnit.MILLIS), // fade in
+                    Duration.of(1, ChronoUnit.SECONDS), // stay
+                    Duration.of(500, ChronoUnit.MILLIS) // fade out
+            ));
+            player.sendTitlePart(TitlePart.TITLE, MiniMessage.miniMessage().deserialize("<green>Your client type is <yellow><client> <green>with <yellow><accuracy>% <green>accuracy.",
+                    Placeholder.component("client", Component.text(clientState.lastClientType)),
+                    Placeholder.component("accuracy", Component.text(clientState.lastPercentage))
+            ));
+            player.sendTitlePart(TitlePart.SUBTITLE, MiniMessage.miniMessage().deserialize("<green>Last evaluation: <yellow><last_eval_time>,<green> Next evaluation: <yellow><next_eval_time>(<yellow><minutes_remaining>m <seconds_remaining>s <green>remaining)",
+                    Placeholder.component("last_eval_time", Component.text(lastEvalTime)),
+                    Placeholder.component("next_eval_time", Component.text(nextEvalTime)),
+                    Placeholder.component("minutes_remaining", Component.text(minutesRemaining)),
+                    Placeholder.component("seconds_remaining", Component.text(secondsRemaining))
+            ));
+        });
     }
 }
